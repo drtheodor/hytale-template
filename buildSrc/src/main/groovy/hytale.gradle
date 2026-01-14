@@ -1,0 +1,183 @@
+import java.nio.file.Files
+
+plugins {
+    id "java"
+}
+
+DependencyHandler.metaClass.hytale = {
+    String v = "0.0.0" -> delegate.add("implementation", files(project.layout.buildDirectory.file("hytale/HytaleServer.jar")))
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    hytale()
+
+    testImplementation(platform("org.junit:junit-bom:5.10.0"))
+    testImplementation("org.junit.jupiter:junit-jupiter")
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+processResources {
+    def expansionVars = providers.gradlePropertiesPrefixedBy("")
+        .getOrNull()
+
+    if (!expansionVars) return
+
+    expansionVars.entrySet().forEach {
+        inputs.property(it.key, it.value)
+    }
+
+    filteringCharset = "UTF-8"
+
+    filesMatching("manifest.json") {
+        expand(expansionVars)
+    }
+}
+
+test {
+    useJUnitPlatform()
+}
+
+tasks.register("setupHytaleServer") {
+    group = "hytale"
+    description = "Ensures HytaleServer.jar and Assets.zip are available in dev environment"
+
+    doLast {
+        def buildDir = project.layout.buildDirectory.get().asFile
+        def hytaleDir = new File(buildDir, "hytale")
+        def tmpDir = new File(buildDir, "tmp")
+
+        hytaleDir.mkdirs()
+        tmpDir.mkdirs()
+
+        def hytaleJar = new File(hytaleDir, "HytaleServer.jar")
+        def assetsZip = new File(hytaleDir, "Assets.zip")
+
+        if (!hytaleJar.exists() || !assetsZip.exists()) {
+            def parentJar = new File(project.projectDir.parentFile, "HytaleServer.jar")
+            def parentAssets = new File(project.projectDir.parentFile, "Assets.zip")
+
+            if (parentJar.exists() && parentAssets.exists()) {
+                logger.lifecycle("Creating symbolic links from parent directory")
+
+                try {
+                    Files.createSymbolicLink(
+                            hytaleJar.toPath(),
+                            parentJar.toPath().toAbsolutePath()
+                    )
+                    Files.createSymbolicLink(
+                            assetsZip.toPath(),
+                            parentAssets.toPath().toAbsolutePath()
+                    )
+                    logger.lifecycle("Created symbolic links")
+                } catch (Exception e) {
+                    logger.log(LogLevel.WARN, "Symbolic links failed, copying files instead: ${e.message}")
+
+                    ant.copy(file: parentJar.absolutePath, tofile: hytaleJar.absolutePath, overwrite: true)
+                    ant.copy(file: parentAssets.absolutePath, tofile: assetsZip.absolutePath, overwrite: true)
+                    logger.lifecycle("Copied files from parent directory")
+                }
+            } else {
+                def downloaderName = getDownloaderName()
+                def downloader = new File(hytaleDir, downloaderName)
+
+                if (!downloader.exists()) {
+                    logger.lifecycle("Downloading hytale-downloader...")
+
+                    def downloaderZip = new File(tmpDir, 'hytale-downloader.zip')
+                    def url = 'https://downloader.hytale.com/hytale-downloader.zip'
+
+                    downloaderZip.parentFile.mkdirs()
+                    ant.get(src: url, dest: downloaderZip)
+
+                    ant.unzip(src: downloaderZip, dest: hytaleDir)
+
+                    downloaderZip.delete()
+
+                    // Make executable (Unix/Linux/Mac)
+                    if (!project.plugins.hasPlugin("org.gradle.c-native")) {
+                        downloader.setExecutable(true, false)
+                    }
+
+                    logger.lifecycle('Downloaded and extracted hytale-downloader')
+                }
+
+                logger.lifecycle('Running hytale-downloader...')
+
+                project.providers.exec {
+                    workingDir = hytaleDir
+                    commandLine = [downloader.absolutePath]
+                }.result.get()
+
+                logger.lifecycle('hytale-downloader completed')
+            }
+        } else {
+            logger.lifecycle('Hytale files already exist in build/hytale')
+        }
+    }
+}
+
+static def getDownloaderName() {
+    def os = System.getProperty('os.name').toLowerCase()
+    def arch = System.getProperty('os.arch').toLowerCase()
+
+    if (os.contains("win")) {
+        return "hytale-downloader-windows-amd64.exe"
+    } else if (os.contains("mac")) {
+        return "hytale-downloader-darwin-amd64"
+    } else if (os.contains("nix") || os.contains("nux") || os.contains("aix")) {
+        if (arch.contains("64")) {
+            return "hytale-downloader-linux-amd64"
+        } else if (arch.contains("arm") || arch.contains("aarch")) {
+            return "hytale-downloader-linux-arm64"
+        }
+    }
+
+    return "hytale-downloader-linux-amd64" // default
+}
+
+compileJava.configure {
+    dependsOn("setupHytaleServer")
+}
+
+tasks.register("prepareHytaleBuild", Copy) {
+    group = "hytale"
+
+    def mods = project.layout.projectDirectory.file("run/mods").asFile
+    mods.mkdirs()
+
+    from(tasks.named("jar"))
+    into(mods)
+
+    rename { _ -> "dev.jar" }
+}
+
+tasks.register("runHytaleServer", JavaExec) {
+    def base = project.layout.buildDirectory.file("hytale").get().asFile
+
+    def path = new File(base, "HytaleServer.jar")
+    def assets = new File(base, "Assets.zip")
+
+    group = "hytale"
+    description = "Runs the hytale server with the built mod"
+
+    mainClass = "-jar"
+    args = [path.toString(), "--assets", assets.toString(), "--disable-sentry"]
+
+    workingDir = project.layout.projectDirectory.file("run").asFile
+    workingDir.mkdirs()
+
+    dependsOn("prepareHytaleBuild")
+
+    onlyIf {
+        base.exists() && path.exists() && assets.exists()
+    }
+}
