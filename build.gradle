@@ -1,3 +1,21 @@
 plugins {
-    id "hytale"
+    id "dev.drtheo.hytale-gradle" version "0.0.5"
+}
+
+dependencies {
+    implementation hytale.server()
+}
+
+processResources {
+    def expansionVars = providers.gradlePropertiesPrefixedBy("").get()
+
+    expansionVars.entrySet().forEach {
+        inputs.property(it.key, it.value)
+    }
+
+    filteringCharset = "UTF-8"
+
+    filesMatching("manifest.json") {
+        expand(expansionVars)
+    }
 }

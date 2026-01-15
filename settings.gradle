@@ -1,0 +1,11 @@
+pluginManagement {
+    repositories {
+        maven {
+            url "https://theo.is-a.dev/maven"
+        }
+
+        gradlePluginPortal()
+    }
+}
+
+rootProject.name = "hytale-template"
